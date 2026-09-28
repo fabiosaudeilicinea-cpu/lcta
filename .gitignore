@@ -1,2 +1,5 @@
-# Logs
-*.log
+node_modules/
+dist/
+*.tsbuildinfo
+pipeline.log
+.DS_Store
