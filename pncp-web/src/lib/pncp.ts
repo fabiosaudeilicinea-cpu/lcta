@@ -66,13 +66,86 @@ export async function buscarPropostasAbertas(params: {
   return getJson<PageResponse<PncpCompraRaw>>(`?${q.toString()}`)
 }
 
+/**
+ * Busca genérica paginada por período de publicação (ação=publicacao).
+ * Usada pelo pipeline para varreduras amplas além das propostas em aberto.
+ */
+export async function buscarPorPublicacao(params: {
+  dataInicial: Date
+  dataFinal: Date
+  modalidade?: number
+  uf?: string
+  pagina?: number
+  tamanhoPagina?: number
+}): Promise<PageResponse<PncpCompraRaw> | null> {
+  const q = new URLSearchParams({
+    acao: 'publicacao',
+    dataInicial: ymd(params.dataInicial),
+    dataFinal: ymd(params.dataFinal),
+    pagina: String(params.pagina ?? 1),
+    tamanhoPagina: String(params.tamanhoPagina ?? 50),
+  })
+  if (params.modalidade != null) q.set('codigoModalidadeContratacao', String(params.modalidade))
+  if (params.uf) q.set('uf', params.uf)
+  return getJson<PageResponse<PncpCompraRaw>>(`?${q.toString()}`)
+}
+
+/**
+ * Retorna a lista bruta de candidatos do funil (propostas em aberto, com
+ * fallback para publicações recentes quando o endpoint A não devolve dados).
+ */
+export async function coletarCandidatos(params: {
+  dataInicial: Date
+  dataFinal: Date
+  modalidades: number[]
+  maxRegistros: number
+  onProgress?: (msg: string, pct: number) => void
+}): Promise<PncpCompraRaw[]> {
+  const brutos: PncpCompraRaw[] = []
+  for (const modalidade of params.modalidades) {
+    for (let pagina = 1; pagina <= 8; pagina++) {
+      if (brutos.length >= params.maxRegistros) break
+      params.onProgress?.(`Varredura PNCP (modalidade ${modalidade}, página ${pagina})…`, 5 + pagina * 4)
+      let res = await buscarPropostasAbertas({ dataInicial: params.dataInicial, dataFinal: params.dataFinal, modalidade, pagina })
+      if (!res?.data?.length && pagina === 1) {
+        res = await buscarPorPublicacao({ dataInicial: params.dataInicial, dataFinal: params.dataFinal, modalidade, pagina })
+      }
+      if (!res || !res.data?.length) break
+      brutos.push(...res.data)
+      if (pagina >= res.totalPaginas) break
+      await new Promise((r) => setTimeout(r, 250)) // gentileza com a API pública
+    }
+  }
+  return brutos
+}
+
+/**
+ * Normaliza a resposta do endpoint de itens: aceita array puro, `{data:[...]}`
+ * ou itens embutidos no próprio registro cru (`raw.itens`).
+ */
+export function normalizarItens(
+  res: unknown,
+  raw?: { itens?: unknown },
+): ItemCompra[] {
+  if (Array.isArray(res)) return res as ItemCompra[]
+  if (res && typeof res === 'object') {
+    const obj = res as Record<string, unknown>
+    if (Array.isArray(obj.data)) return obj.data as ItemCompra[]
+    if (Array.isArray(obj.itens)) return obj.itens as ItemCompra[]
+  }
+  if (raw && Array.isArray(raw.itens)) return raw.itens as ItemCompra[]
+  return []
+}
+
 /** Endpoint C — itens/TR estruturado. */
-export async function buscarItens(numeroControlePNCP: string): Promise<ItemCompra[]> {
+export async function buscarItens(
+  numeroControlePNCP: string,
+  raw?: PncpCompraRaw & { itens?: unknown },
+): Promise<ItemCompra[]> {
   const c = componentes(numeroControlePNCP)
-  if (!c) return []
-  const res = await getJson<{ data?: ItemCompra[] } | ItemCompra[]>(`?acao=itens&id=${encodeURIComponent(c.cnpj + '/' + c.ano + '/' + c.seq)}`)
-  if (!res) return []
-  return Array.isArray(res) ? res : (res.data ?? [])
+  if (!c) return normalizarItens(null, raw)
+  const res = await getJson<unknown>(`?acao=itens&id=${encodeURIComponent(c.cnpj + '/' + c.ano + '/' + c.seq)}`)
+  return normalizarItens(res, raw)
 }
 
 /** Endpoint D — documentação/anexos. */
