@@ -5,29 +5,42 @@
  * ==========================================================================*/
 
 import { classificarEdital, devePassarNoFunil, dedupeKey, derivarStatus, extrairDescritivoSeguro, orcamentoIndisponivel } from './funil'
-import { buscarDocumentacao, buscarItens, buscarPorPublicacao, linkPncpOficial } from './pncp'
-import type { Edital, PncpCompraRaw, Snapshot, SnapshotMeta } from './types'
+import { buscarDocumentacao, buscarItens, coletarCandidatos, linkPncpOficial } from './pncp'
+import type { Edital, ItemCompra, PncpCompraRaw, Snapshot, SnapshotMeta } from './types'
 
 export const VERSAO_PIPELINE = '1.0.0'
 const MODALIDADES_TECH = [4, 6] // Concorrência Eletrônica + Pregão Eletrônico
 
+/** Registro cru + possíveis itens embutidos (o PNCP pode retornar `itens` inline). */
+type RawComItens = PncpCompraRaw & { itens?: unknown }
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+/** Extrai itens embutidos (se vierem como objeto não tipado do JSON da API). */
+function itensInline(raw: PncpCompraRaw & { itens?: unknown }): ItemCompra[] | undefined {
+  return Array.isArray(raw.itens) ? (raw.itens as ItemCompra[]) : undefined
+}
 
 /** Enriquece um registro cru em um registro limpo do modelo `Edital`. */
 export async function processarRegistro(
-  raw: PncpCompraRaw,
+  rawInput: PncpCompraRaw & { itens?: unknown },
   opts: { enriquecer: boolean; agora?: Date },
 ): Promise<{ edital?: Edital; duplicado: boolean; descartadoFalsoPositivo: boolean }> {
-  let itens: PncpCompraRaw['itens'] | undefined
+  // normaliza itens inline vindos do JSON (unknown → ItemCompra[])
+  const raw: RawComItens & { itens?: ItemCompra[] } = { ...rawInput, itens: itensInline(rawInput) }
+  let itens: ItemCompra[] | undefined
   let anexos: Edital['anexos'] = []
 
   if (opts.enriquecer && raw.numeroControlePNCP) {
     try {
-      itens = await buscarItens(raw.numeroControlePNCP)
+      itens = await buscarItens(raw.numeroControlePNCP, raw)
       anexos = await buscarDocumentacao(raw.numeroControlePNCP)
     } catch {
       /* falha de enriquecimento não derruba o funil — cai na nomenclatura oficial */
     }
+  } else {
+    // usa itens inline quando presentes, sem custo de chamada extra
+    itens = raw.itens
   }
 
   const cls = classificarEdital({ ...raw, itens })
@@ -94,25 +107,20 @@ export async function executarPipeline(
 
   // ---------- A. INGESTÃO (matriz: modalidades × páginas) ----------
   prog('Consultando API pública do PNCP…', 5)
-  const brutos: PncpCompraRaw[] = []
-  for (const modalidade of MODALIDADES_TECH) {
-    for (let pagina = 1; pagina <= 8; pagina++) {
-      if (brutos.length >= maxRegistros) break
-      prog(`Varredura PNCP (modalidade ${modalidade}, página ${pagina})…`, 5 + pagina * 4)
-      const res = await buscarPorPublicacao(dataInicial, dataFinal, modalidade, undefined, undefined, pagina, 50)
-      if (!res || !res.data?.length) break
-      brutos.push(...res.data)
-      if (pagina >= res.totalPaginas) break
-      await sleep(250) // gentileza com a API pública
-    }
-  }
+  const brutos = (await coletarCandidatos({
+    dataInicial,
+    dataFinal,
+    modalidades: MODALIDADES_TECH,
+    maxRegistros,
+    onProgress: prog,
+  })) as RawComItens[]
 
   const brutosCapturados = brutos.length
 
   // ---------- B1. DESDUPLICAÇÃO ----------
   prog('Desduplicando registros…', 45)
   const vistos = new Set<string>()
-  const unicos: PncpCompraRaw[] = []
+  const unicos: RawComItens[] = []
   let duplicadosRemovidos = 0
   for (const c of brutos) {
     const k = dedupeKey(c)
@@ -129,15 +137,15 @@ export async function executarPipeline(
   const passariam: PncpCompraRaw[] = []
   let falsosPositivos = 0
   for (const c of unicos) {
-    const cls = classificarEdital(c)
+    const cls = classificarEdital({ ...c, itens: itensInline(c) })
     if (devePassarNoFunil(cls)) passariam.push(c)
     else falsosPositivos++
   }
 
   // ordena por score para enriquecer apenas o topo (economia de chamadas)
   passariam.sort((a, b) => {
-    const sa = classificarEdital(a).scoreRelevancia
-    const sb = classificarEdital(b).scoreRelevancia
+    const sa = classificarEdital({ ...a, itens: itensInline(a) }).scoreRelevancia
+    const sb = classificarEdital({ ...b, itens: itensInline(b) }).scoreRelevancia
     return sb - sa
   })
 
