@@ -5,8 +5,8 @@
  * ==========================================================================*/
 
 import { classificarEdital, devePassarNoFunil, dedupeKey, derivarStatus, extrairDescritivoSeguro, orcamentoIndisponivel } from './funil'
-import { buscarDocumentacao, buscarItens, buscarPorPublicacao, linkPncpOficial } from './pncp'
-import type { Edital, PncpCompraRaw, Snapshot, SnapshotMeta } from './types'
+import { buscarDocumentacao, buscarItens, buscarPropostasAbertas, linkPncpOficial } from './pncp'
+import type { Edital, ItemCompra, PncpCompraRaw, Snapshot, SnapshotMeta } from './types'
 
 export const VERSAO_PIPELINE = '1.0.0'
 const MODALIDADES_TECH = [4, 6] // Concorrência Eletrônica + Pregão Eletrônico
@@ -18,7 +18,7 @@ export async function processarRegistro(
   raw: PncpCompraRaw,
   opts: { enriquecer: boolean; agora?: Date },
 ): Promise<{ edital?: Edital; duplicado: boolean; descartadoFalsoPositivo: boolean }> {
-  let itens: PncpCompraRaw['itens'] | undefined
+  let itens: ItemCompra[] | undefined
   let anexos: Edital['anexos'] = []
 
   if (opts.enriquecer && raw.numeroControlePNCP) {
@@ -99,7 +99,7 @@ export async function executarPipeline(
     for (let pagina = 1; pagina <= 8; pagina++) {
       if (brutos.length >= maxRegistros) break
       prog(`Varredura PNCP (modalidade ${modalidade}, página ${pagina})…`, 5 + pagina * 4)
-      const res = await buscarPorPublicacao(dataInicial, dataFinal, modalidade, undefined, undefined, pagina, 50)
+      const res = await buscarPropostasAbertas({ dataInicial, dataFinal, modalidade, pagina, tamanhoPagina: 50 })
       if (!res || !res.data?.length) break
       brutos.push(...res.data)
       if (pagina >= res.totalPaginas) break
