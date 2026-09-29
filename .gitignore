@@ -1,5 +1,2 @@
-node_modules/
-dist/
-*.tsbuildinfo
-pipeline.log
-.DS_Store
+#Compressed files
+*.zip
